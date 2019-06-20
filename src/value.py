@@ -14,7 +14,7 @@ def get_value(address, coord_x, coord_y):
 
     with rasterio.open(address) as src:
         # Use pyproj to convert point coordinates
-        utm = pyproj.Proj(src.crs)  # Pass CRS of image from rasterio
+        utm = pyproj.Proj('%s' % (src.crs))  # Pass CRS of image from rasterio
         lonlat = pyproj.Proj(init='epsg:4326')
 
         # If different length of arrays

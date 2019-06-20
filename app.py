@@ -29,6 +29,19 @@ import gzip
 # from lambda_proxy.proxy import API
 
 
+def remap_array(arr):
+    """
+    Remapping [4, 256,256] to [256,256, 4]
+    """
+    return np.moveaxis(arr, 0, 2)
+
+def reverse_remap_array(arr):
+    """
+    Remapping [4, 256,256] to [256,256, 4]
+    """
+    return np.moveaxis(arr, 2, 0)
+
+
 class TilerError(Exception):
     """Base exception class."""
 
@@ -82,9 +95,9 @@ def metadata():
 
 
 # Generate PNG/JPEG tiles of the given tile from raster
-@app.route('/api/v1/tiles/<int:tile_z>/<int:tile_x>/<int:tile_y>', methods=['GET'])
-@app.route('/api/v1/tiles/<int:tile_z>/<int:tile_x>/<int:tile_y>.<tileformat>', methods=['GET'])
-def tile(tile_z, tile_x, tile_y, tileformat='png'):
+@app.route('/api/v1/ndvi/<int:tile_z>/<int:tile_x>/<int:tile_y>', methods=['GET'])
+@app.route('/api/v1/ndvi/<int:tile_z>/<int:tile_x>/<int:tile_y>.<tileformat>', methods=['GET'])
+def ndvi(tile_z, tile_x, tile_y, tileformat='png'):
 
     # Rendering only if zoom level is greater than 9
     if int(tile_z) < 9:
@@ -100,20 +113,24 @@ def tile(tile_z, tile_x, tile_y, tileformat='png'):
     url = request.args.get('url', default='', type=str)
     url = requote_uri(url)
 
-    colormap = request.args.get('cmap', default='majama', type=str)
-    min_value = request.args.get('min', type=float)
-    max_value = request.args.get('max', type=float)
-    nodata = request.args.get('nodata', default=-9999, type=float)
+    colormap = request.args.get('cmap', default='green', type=str)
+    min_value = request.args.get('min', default= 0, type=float)
+    max_value = request.args.get('max', default= 1, type=float)
+    nodata = request.args.get('nodata', default=0, type=float)
     tilesize = request.args.get('tile', 256)
     indexes = request.args.get('indexes')
-    numband = request.args.get('numband', type=int)
+    numband = request.args.get('numband', default=1, type=int)
     scale = request.args.get('scale', default=1, type=int)
+    
     scale = int(scale)
 
     if not url:
         raise TilerError("Missing 'url' parameter")
     if indexes:
         indexes = tuple(int(s) for s in re.findall(r'\d+', indexes))
+
+    b4 = url + 'B04.tif'
+    b8 = url + 'B08.tif'
 
     tilesize = int(tilesize) if isinstance(tilesize, str) else tilesize
 
@@ -123,55 +140,187 @@ def tile(tile_z, tile_x, tile_y, tileformat='png'):
     if numband is not None:
         numband = int(numband)
 
-    if numband == 3 or numband == 4:
-        st_time = time.time()
-        tile, mask = main.tile(url,
-                               tile_x,
-                               tile_y,
-                               tile_z,
-                               indexes=indexes,
-                               tilesize=tilesize*scale,
-                               nodata=None,
-                               resampling_method="cubic_spline")
+    st_time = time.time()
+    b4, mask = main.tile(b4,
+                        tile_x,
+                        tile_y,
+                        tile_z,
+                        indexes=indexes,
+                        tilesize=tilesize*scale,
+                        nodata=nodata,
+                        resampling_method="nearest")
 
-        end_time = time.time()
-        print('Reading time: ', end_time-st_time)
+    b8, mask = main.tile(b8,
+                        tile_x,
+                        tile_y,
+                        tile_z,
+                        indexes=indexes,
+                        tilesize=tilesize*scale,
+                        nodata=nodata,
+                        resampling_method="nearest")
+    ndvi = (b8-b4)/(b8+b4)
 
-        # Converting it to Unsigned integer 8 bit if not.
-        tile = np.uint8(tile)
+    end_time = time.time()
+    print('Reading time: ', end_time-st_time)
 
-        # Convering from array to image bytes type
-        # img = array_to_image(tile)
-        img = response.array_to_img(
-            arr=tile, tilesize=tilesize, scale=scale, tileformat=tileformat)
+    # Coloring 1 dimension array to 3 dimension color array
+    color_arr = ele_func.jet_colormap(
+        ndvi[0, :, :], arr_min=min_value, arr_max=max_value, colormap=colormap, mask=mask, nodata=nodata)
 
-    elif numband == 1:
-        st_time = time.time()
-        tile, mask = main.tile(url,
-                               tile_x,
-                               tile_y,
-                               tile_z,
-                               indexes=indexes,
-                               tilesize=tilesize*scale,
-                               nodata=nodata,
-                               resampling_method="cubic_spline")
+    # Remapping [row, col, dim] to [dim, row, col] format
+    color_arr = ele_func.remap_array(arr=color_arr)
+    # img = array_to_image(arr=color_arr)
+    img = response.array_to_img(
+        arr=color_arr, tilesize=tilesize, scale=scale, tileformat=tileformat, mask=mask)
 
-        end_time = time.time()
-        print('Reading time: ', end_time-st_time)
+    return Response(img, mimetype='image/%s' % (tileformat))
 
-        # Coloring 1 dimension array to 3 dimension color array
-        color_arr = ele_func.jet_colormap(
-            tile[0, :, :], arr_min=min_value, arr_max=max_value, colormap=colormap, mask=mask, nodata=nodata)
+# Generate PNG/JPEG tiles of the given tile from raster
+@app.route('/api/v1/ndwi/<int:tile_z>/<int:tile_x>/<int:tile_y>', methods=['GET'])
+@app.route('/api/v1/ndwi/<int:tile_z>/<int:tile_x>/<int:tile_y>.<tileformat>', methods=['GET'])
+def ndwi(tile_z, tile_x, tile_y, tileformat='png'):
 
-        # Remapping [row, col, dim] to [dim, row, col] format
-        color_arr = ele_func.remap_array(arr=color_arr)
-        # img = array_to_image(arr=color_arr)
-        img = response.array_to_img(
-            arr=color_arr, tilesize=tilesize, scale=scale, tileformat=tileformat)
+    # Rendering only if zoom level is greater than 9
+    if int(tile_z) < 9:
+        return Response(None)
+
+    """Handle Tile requests."""
+    if tileformat == 'jpg':
+        tileformat = 'jpeg'
+
+    # query_args = APP.current_request.query_params
+    # query_args = query_args if isinstance(query_args, dict) else {}
+
+    url = request.args.get('url', default='', type=str)
+    url = requote_uri(url)
+
+    colormap = request.args.get('cmap', default='blue', type=str)
+    min_value = request.args.get('min', default= 0, type=float)
+    max_value = request.args.get('max', default= 1, type=float)
+    nodata = request.args.get('nodata', default=0, type=float)
+    tilesize = request.args.get('tile', 256)
+    indexes = request.args.get('indexes')
+    numband = request.args.get('numband', default=1, type=int)
+    scale = request.args.get('scale', default=1, type=int)
+    
+    scale = int(scale)
+
+    if not url:
+        raise TilerError("Missing 'url' parameter")
+    if indexes:
+        indexes = tuple(int(s) for s in re.findall(r'\d+', indexes))
+
+    b11 = url + 'B11.tif'
+    b8 = url + 'B08.tif'
+
+    tilesize = int(tilesize) if isinstance(tilesize, str) else tilesize
+
+    if nodata is not None:
+        nodata = int(nodata)
+
+    if numband is not None:
+        numband = int(numband)
+
+    st_time = time.time()
+    b11, mask = main.tile(b11,
+                        tile_x,
+                        tile_y,
+                        tile_z,
+                        indexes=indexes,
+                        tilesize=tilesize*scale,
+                        nodata=nodata,
+                        resampling_method="nearest")
+
+    b8, mask = main.tile(b8,
+                        tile_x,
+                        tile_y,
+                        tile_z,
+                        indexes=indexes,
+                        tilesize=tilesize*scale,
+                        nodata=nodata,
+                        resampling_method="nearest")
+
+    ndwi = (b8-b11)/(b8+b11)
+
+    end_time = time.time()
+    print('Reading time: ', end_time-st_time)
+
+    # Coloring 1 dimension array to 3 dimension color array
+    color_arr = ele_func.jet_colormap(
+        ndwi[0, :, :], arr_min=min_value, arr_max=max_value, colormap=colormap, mask=mask, nodata=nodata)
+
+    # Remapping [row, col, dim] to [dim, row, col] format
+    color_arr = ele_func.remap_array(arr=color_arr)
+    # img = array_to_image(arr=color_arr)
+    img = response.array_to_img(
+        arr=color_arr, tilesize=tilesize, scale=scale, tileformat=tileformat, mask=mask)
 
     return Response(img, mimetype='image/%s' % (tileformat))
 
 
+
+# Generate PNG/JPEG tiles of the given tile from raster
+@app.route('/api/v1/tiles/<int:tile_z>/<int:tile_x>/<int:tile_y>', methods=['GET'])
+@app.route('/api/v1/tiles/<int:tile_z>/<int:tile_x>/<int:tile_y>.<tileformat>', methods=['GET'])
+def index(tile_z, tile_x, tile_y, tileformat='png'):
+
+    # Rendering only if zoom level is greater than 9
+    if int(tile_z) < 9:
+        return Response(None)
+
+    """Handle Tile requests."""
+    if tileformat == 'jpg':
+        tileformat = 'jpeg'
+
+    # query_args = APP.current_request.query_params
+    # query_args = query_args if isinstance(query_args, dict) else {}
+
+    url = request.args.get('url', default='', type=str)
+    url = requote_uri(url)
+
+    nodata = request.args.get('nodata', default=-9999, type=float)
+    tilesize = request.args.get('tile', 256)
+    indexes = request.args.get('indexes')
+    numband = request.args.get('numband', default=1, type=int)
+    scale = request.args.get('scale', default=1, type=int)
+    
+    scale = int(scale)
+
+    if not url:
+        raise TilerError("Missing 'url' parameter")
+    if indexes:
+        indexes = tuple(int(s) for s in re.findall(r'\d+', indexes))
+
+    true_color = url + 'TCI.tif'
+
+    tilesize = int(tilesize) if isinstance(tilesize, str) else tilesize
+
+    if nodata is not None:
+        nodata = int(nodata)
+
+    if numband is not None:
+        numband = int(numband)
+
+    st_time = time.time()
+    tile, mask = main.tile(true_color,
+                        tile_x,
+                        tile_y,
+                        tile_z,
+                        indexes=indexes,
+                        tilesize=tilesize*scale,
+                        nodata=nodata,
+                        resampling_method="nearest")
+
+    end_time = time.time()
+    print('Reading time: ', end_time-st_time)
+
+    # img = array_to_image(arr=color_arr)
+    tile = np.uint8(tile)
+    img = response.array_to_img(
+        arr=tile, tilesize=tilesize, scale=scale, tileformat=tileformat)
+
+    return Response(img, mimetype='image/%s' % (tileformat))
+    
 # Gives data value from raster
 @app.route('/api/v1/value', methods=['GET'])
 def value():
@@ -185,93 +334,8 @@ def value():
     y = request.args.get('y', type=float)
     # address = query_args['url']
     info = get_value.get_value(address=url, coord_x=x, coord_y=y)
+    print(info)
     return (jsonify(info))
-
-
-# Generates elevation/data profile from raster
-@app.route('/api/v1/profile', methods=['GET'])
-def profile():
-    """Handle Elevation profile requests."""
-    url = request.args.get('url', default='', type=str)
-    step = request.args.get('step', default=0.30, type=float)
-
-    url = requote_uri(url)
-
-    if not url:
-        raise TilerError("Missing 'url' parameter")
-
-    # Gives an list of string
-    x = request.args.get('x')
-    y = request.args.get('y')
-
-    x = np.array(x.split(','), dtype=float)
-    y = np.array(y.split(','), dtype=float)
-
-    print('data:', x)
-    print('length:', len(x))
-
-    coord_x = []
-    coord_y = []
-
-    # Checking length of x and y
-    if len(x) != len(y):
-        raise TilerError('Error: Length of X and Y parameters are not equal')
-
-    elif len(x) < 2:
-        raise TilerError(
-            'Error: Length of parameters should be greater than 1')
-
-    for i in range(len(x)-1):
-        print('Generating line from points')
-        temp_x, temp_y = get_profile.get_point2line(
-            x[i], y[i], x[i+1], y[i+1], step=step)
-
-        if temp_x is None or temp_y is None:
-            raise TilerError(
-                'Error: Distance between points should be less than 10KM')
-
-        for j in range(len(temp_x)):
-            coord_x.append(temp_x[j])
-            coord_y.append(temp_y[j])
-
-    print('Generated %d number of points' % (len(coord_x)))
-    # Initializing dataset
-    data = []
-    info = get_value.get_value(
-        address=url, coord_x=coord_x, coord_y=coord_y)
-    return (jsonify(info))
-
-
-# Gives volume value from raster
-@app.route('/api/v1/volume', methods=['GET'])
-def volume():
-    """Handle Value requests."""
-    url = request.args.get('url', default='', type=str)
-    method = request.args.get('method', default='bfit', type=str)
-    step = request.args.get('step', default=2, type=float)
-
-    url = requote_uri(url)
-    if not url:
-        raise TilerError("Missing 'url' parameter")
-
-    # Gives an list of string
-    x = request.args.get('x')
-    y = request.args.get('y')
-
-    # Spliting string into each element and redefining as float
-    x = np.array(x.split(','), dtype=float)
-    y = np.array(y.split(','), dtype=float)
-
-    if len(x) != len(y):
-        TilerError("length of x and y coordinates are not equal")
-    elif len(x) < 3:
-        TilerError("number of points should be greater than or equal to 3")
-    start_time = time.time()
-    info = get_volume.get_volume(address=url, coord_x=x, coord_y=y, step=step)
-    end_time = time.time()
-    print('Time Taken: %d' % (end_time-start_time))
-    return (jsonify(info))
-
 
 @app.route('/api/v1/favicon.ico', methods=['GET'])
 def favicon():
@@ -284,7 +348,7 @@ def favicon():
 
 
 if __name__ == '__main__':
-    app.run(debug=True, threaded=True)
+    app.run()
 
 
 """
